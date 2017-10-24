@@ -1,0 +1,18 @@
+[package]
+name = "jd_comments"
+version = "0.1.0"
+authors = ["dalecgu <1677160278@qq.com>"]
+
+[dependencies]
+encoding = "0.2"
+config = "0.7"
+serde = "1.0.15"
+serde_derive = "1.0.15"
+serde_json = "1.0"
+mysql = "*"
+bson = "0.10.0"
+mongodb = "0.3.7"
+futures = "0.1"
+hyper = "0.11"
+hyper-tls = "0.1.2"
+tokio-core = "0.1"
