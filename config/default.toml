@@ -8,4 +8,4 @@ db = "test"
 collection = "comments"
 
 [app]
-page_size = 10000
+page_size = 10
