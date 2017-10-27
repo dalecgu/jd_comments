@@ -4,6 +4,9 @@ version = "0.1.0"
 authors = ["dalecgu <1677160278@qq.com>"]
 
 [dependencies]
+log = "*"
+env_logger = "*"
+chrono = "*"
 encoding = "0.2"
 config = "0.7"
 serde = "1.0.15"

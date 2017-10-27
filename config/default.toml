@@ -1,5 +1,5 @@
 [mysql]
-url = "mysql://root:123456@192.168.1.35:3306/jd"
+url = "mysql://root:0406@192.168.1.141:3306/jd"
 
 [mongodb]
 host = "localhost"

@@ -1,4 +1,8 @@
 #[macro_use]
+extern crate log;
+extern crate env_logger;
+extern crate chrono;
+#[macro_use]
 extern crate mysql;
 extern crate encoding;
 extern crate futures;
@@ -16,8 +20,8 @@ extern crate config;
 mod settings;
 
 use std::str;
+use std::error::Error;
 
-use mysql::*;
 use encoding::all::{GBK, UTF_8};
 use encoding::{Encoding, EncoderTrap, DecoderTrap};
 use hyper_tls::HttpsConnector;
@@ -40,7 +44,7 @@ fn get_goods_count(pool: &mysql::Pool) -> u32 {
     let count: Option<u32> = pool.first_exec(r"SELECT count(*) FROM jd_goods", ())
         .map(|result| {
             result.map(|x| x.unwrap()).map(|mut row| {
-                from_value::<u32>(row.pop().unwrap())
+                mysql::from_value::<u32>(row.pop().unwrap())
             })
         }).unwrap();
 
@@ -64,7 +68,7 @@ fn get_goods_by_page(pool: &mysql::Pool, current_size: u32, page_size: u32) -> V
     return selected_goods;
 }
 
-fn crawl(product_id: &str, page: u32) -> String {
+fn crawl(product_id: &str, page: u32) -> Result<String, Box<Error>> {
     let mut core = Core::new()
         .expect("Failed to initialize core");
     let handle = core.handle();
@@ -75,43 +79,54 @@ fn crawl(product_id: &str, page: u32) -> String {
     // let url = format!("https://club.jd.com/comment/skuProductPageComments.action?productId={}&score=0&sortType=6&page={}&pageSize=10&isShadowSku=0&rid=0&fold=1", product_id, page);
     // let url = format!("https://club.jd.com/comment/productPageComments.action?productId={}&score=0&sortType=6&page={}&pageSize=10&isShadowSku=0&rid=0&fold=1", product_id, page);
     let url = format!("https://club.jd.com/productpage/p-{}-s-0-t-6-p-{}.html", product_id, page);
-    let uri = url.parse()
-        .expect("Failed to parse url");
+    let uri = try!(url.parse());
     let work = client.get(uri).and_then(|res| {
-        assert_eq!(hyper::StatusCode::Ok, res.status());
         res.body().concat2()
     });
-    let got = core.run(work)
-        .expect("Failed to crawl");
+    let got = try!(core.run(work));
     let decode_got = GBK.decode(&got, DecoderTrap::Strict)
         .expect("Failed to decode from gbk");
     let encode_got = UTF_8.encode(&decode_got, EncoderTrap::Strict)
         .expect("Failed to encode to utf8");
     let content = str::from_utf8(&encode_got)
         .expect("Failed to parse bytes to string");
-    content.to_string()
+    Ok(content.to_string())
 }
 
-fn process(content: &str, collection: &mongodb::coll::Collection) -> usize {
-    let json: Value = serde_json::from_str(content)
-        .expect("Failed to deserialize content as json");
-    let json_comments = json.get("comments")
-        .expect("Failed to find 'comments' field");
-    let bson_comments = Bson::from(json_comments.clone());
-    let bson_array = bson_comments.as_array()
-        .expect("Failed to parse bson comments to array");
-    for bson_comment in bson_array {
-        let doc = bson_comment.as_document().unwrap();
-        let id = doc.get("id").unwrap();
-        let mut doc_with_id = doc.clone();
-        doc_with_id.insert("_id", Bson::from(id.clone()));
-        collection.insert_one(doc_with_id, None)
-            .expect("Failed to insert document.");
-    }
-    bson_array.len()
+fn process(content: &str, collection: &mongodb::coll::Collection) -> Result<usize, Box<Error>> {
+    let json: Value = try!(serde_json::from_str(content));
+    Ok(json.get("comments").map_or(0, |comments| {
+        Bson::from(comments.clone()).as_array().map_or(0, |comments| {
+            for comment in comments {
+                let doc = comment.as_document().unwrap();
+                let id = doc.get("id").unwrap();
+                let mut doc_with_id = doc.clone();
+                doc_with_id.insert("_id", Bson::from(id.clone()));
+                collection.insert_one(doc_with_id, None)
+                    .expect("Failed to insert document.");
+            }
+            comments.len()
+        })
+    }))
+}
+
+fn initialize_logger() -> Result<(), log::SetLoggerError> {
+    env_logger::LogBuilder::new()
+        .format(|record| {
+            format!("{} [{}] - {}",
+                    chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                    record.level(),
+                    record.args())
+        })
+        .target(env_logger::LogTarget::Stdout)
+        .init()?;
+    Ok(())
 }
 
 fn main() {
+    initialize_logger()
+        .expect("Failed to initialize logger");
+
     let settings = Settings::new()
         .expect("Failed to initialize settings");
 
@@ -135,7 +150,19 @@ fn main() {
             let mut comments_page = 0u32;
             let mut count = 0u32;
             loop {
-                let n = process(&crawl(&x.id, comments_page), &collection);
+                let n = match crawl(&x.id, comments_page) {
+                    Ok(content) => match process(&content, &collection) {
+                        Ok(n) => n,
+                        Err(e) => {
+                            error!("{}", e);
+                            0
+                        },
+                    },
+                    Err(e) => {
+                        error!("{}", e);
+                        0
+                    },
+                };
 
                 comments_page += 1;
                 count += n as u32;
@@ -145,13 +172,13 @@ fn main() {
                 }
             }
             if count < x.comment_num {
-                println!("Product {}: {} comments expected, {} found.", x.id, x.comment_num, count);
+                warn!("Product {}: {} comments expected, {} found.", x.id, x.comment_num, count);
             }
         }
 
         current_size += page_size;
 
-        println!("Current Size: {}", current_size);
+        info!("Current Size: {}", current_size);
 
         if current_size > goods_count {
             break;
